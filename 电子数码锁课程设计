@@ -1,0 +1,390 @@
+#include<reg51.h>
+#include<string.h>
+#define uchar unsigned char
+#define uint unsigned int
+
+#define LEDLen 3    //使实验箱上的前三个数码管亮
+#define GPIO_KEY P1
+#define WX P2   //数码管位选
+#define DX P0   //数码管段选
+xdata unsigned char OUTBIT _at_ 0x8002;   //位控制口
+xdata unsigned char OUTSEG _at_ 0x8004;   //段控制口
+xdata unsigned char IN     _at_ 0X8001;   //键盘读入口
+
+sbit speaker=P1^4;  //蜂鸣器引脚
+
+
+code unsigned char LEDMAP[ ] = {0x08,0x3f,0x71,0x7f};       // 八段管显示码，数码管显示字符存储数组，按照顺序分别为’_’,’0’,’F’,’8’
+
+uint TIME[3];						//显示字符存储数组
+
+code unsigned char KeyTable[ ] = {  //键码定义
+ 0x16, 0x15, 0x14, 0xff,
+ 0x13, 0x12, 0x11, 0x10,
+ 0x0d, 0x0c, 0x0b, 0x0a,
+ 0x0e, 0x03, 0x06, 0x09,
+ 0x0f, 0x02, 0x05, 0x08,
+ 0x00, 0x01, 0x04, 0x07
+ };
+uchar data scode[]={0,0,0,0,0,0,0,0};//设置的管理员密码，初始为00000000
+uchar data ncode[]={1,1,1,1,1,1,1,1};//初始密码，初始为11111111
+uchar data ncode2[]={9,9,9,9,9,9,9,9};//存储用户输入的内容
+uchar num;//扫描键盘
+
+ 
+bit keyin=0; //输入状态
+bit keyre=0; //判断是否为重置密码状态
+bit flag=0;  //重置密码状态标志
+uint check;   //判断输入密码是否正确
+uint inc=1;//判断是否出现连续三次的错误
+uint q=0; //定义变量q，当q为240，定时器定时50ms*240，即为12000ms即12s，当q为100时，定时器定时50ms*100即5s，当q为60，即为3s，当q为180，即为9s
+void reset();  //函数声明
+void display();
+/*去抖延时函数*/
+void delayms(uint xms)
+{
+	uint t1,t2;
+	for(t1=0;t1<xms;t1++)
+		for(t2=0;t2<110;t2++);
+}
+
+void delay(uint i)//1ms延时		
+{
+  uint x,j;//定义两个无符号字符型变量
+  for(j=0;j<i;j++)//循环j=0，只要j<i，j就一直加到j大于i
+    for(x=0;x<=145;x++);//循环x=0，只要x<=0,x就减到x大于148
+}
+void timeconfigure()   //定时器初始化，设定初始值为50ms
+{
+	TMOD=0x01; //定时器工作方式
+	TH0=0x3c;  //设置初始值
+	TL0=0xB0;  //设置初始值
+	EA=1;      //打开总中断
+	ET0=1;     //打开定时器T0中断
+	TR0=1;     //启动定时器
+}
+void interrupt_0() interrupt 1  //中断使用定时器0中断
+{
+	TH0=0x3C;  //设定初始值
+	TL0=0xB0; //设置初始值
+	q++;
+}
+//数码管显示部分
+void DisplayLED()
+{
+    unsigned char i;
+    unsigned char Pos;
+    unsigned char LED;
+    Pos = 0x20;  //
+    for (i = 0; i < LEDLen; i++)
+    {
+        OUTBIT = 0;   
+        LED = TIME[i];
+        OUTSEG = LED;
+        OUTBIT = Pos;  
+        delay(5);
+        Pos >>= 1;  
+    }
+}
+void LED1()
+{
+	 TIME[0]=LEDMAP[1];
+	 TIME[1]=LEDMAP[2];
+	 TIME[2]=LEDMAP[2];
+	 DisplayLED();
+}
+void LED2()
+{
+	 TIME[0]=LEDMAP[3];
+	 TIME[1]=LEDMAP[3];
+   TIME[2]=LEDMAP[3];
+	 DisplayLED();
+}
+void LED3()
+{
+	 TIME[0]=LEDMAP[0];
+	 TIME[1]=LEDMAP[0];
+	 TIME[2]=LEDMAP[0];
+	 DisplayLED();
+}
+
+void buz()   //无源蜂鸣器的响应函数
+{
+	int i;
+	for(i=0;i<10;i++)
+	{
+		speaker=1;
+	}
+	for(i=0;i<10;i++)
+	{
+		speaker=0;
+	}
+}
+
+//按键扫描程序
+//*********************************
+unsigned char TestKey()
+{
+    OUTBIT = 0;  //输出线设置为0
+    return (~IN & 0x0f);  //读入键状态（高四位不用）
+}
+
+unsigned char GetKey()
+{
+    unsigned char Pos;
+    unsigned char i;
+    unsigned char k;
+    i = 6;
+    Pos = 0x20;  //找出键所在列
+    do {  
+		OUTBIT = ~ Pos;
+        Pos >>= 1;
+        k = ~IN & 0x0f;
+    } while ((--i != 0) && (k == 0));
+    if (k != 0)  //键值=列x4+行
+    {  i *= 4;
+        if (k & 2)
+        i += 1;
+        else if (k & 4)
+        i += 2;
+        else if (k & 8)
+        i += 3;
+        OUTBIT = 0;
+        do {
+					delay(5);
+		}while (TestKey());  //等键释放
+        return(KeyTable[i]);  //取出键码
+    } 
+    else 
+        return(0xff);
+}
+
+uchar KeyDown(void)
+{
+	uchar hang,lie,KEY =0xff;
+	char a=0;
+	if (TestKey()) 
+    {   
+        KEY = (GetKey() & 0x0f);
+    }
+    return KEY;
+}	
+
+/*------------------------------------------------
+          按键值处理函数，返回扫键值
+           可以根据需要改变返回值
+------------------------------------------------*/
+uchar KeyPro(void)
+{
+ uchar key;
+ switch(KeyDown())
+ {
+   case 0x00: key=0;break;//0 按下相应的键显示相对应的码值
+   case 0x01: key=1;break;//1
+	 case 0x02: key=2;break;//2
+   case 0x03: key=3;break;//3
+	 case 0x04: key=4;break;//4
+   case 0x05: key=5;break;//5
+   case 0x06: key=6;break;//6
+	 case 0x07: key=7;break;//7
+   case 0x08: key=8;break;//8
+   case 0x09: key=9;break;//9
+	 case 0x0a: key='A';break;//A
+   case 0x0b: key='B';break;//B
+   case 0x0c: key='C';break;//C
+	 case 0x0d: key='D';break;//D
+   default:key=0xff;break; 
+ }
+ return key;
+ }
+
+/*判断按键的内容*/
+void key()
+{
+	num=KeyPro();
+	if(num=='A')
+	{
+		keyin=~keyin;
+	}
+	if(num=='B') 
+	{
+		keyre=~keyre;
+	} 
+}
+
+/*重置密码*/
+void in_code(uchar *cc,uchar *cc1)
+{
+	uint i,j;
+	for(i=0;i<8;i++)
+	{
+	 	j=i;
+		cc[i]=cc1[i];
+	}
+}
+
+
+/*验证密码，按钮A功能*/
+uint confirm()
+{
+	uint i,j;
+	for(i=0;i<8;i++)
+	{
+		j=i;
+		if(ncode[i]==ncode2[j])
+		{
+			check=1;
+		}
+		else
+		{	
+			check=0;
+			break;							    
+		}
+	}
+	memset(ncode2,'-',sizeof(ncode2));
+	return check;		
+}
+
+/*输入密码，若判断为正确则解锁，为错误则跳转界面重新输入*/
+void input()
+{
+	uint count=1;
+	q=0;              //定时器计数归零
+	while(1)//输入八位密码后验证并跳转
+	{	
+		LED3();            //数码管刷新显示_ _ _
+		if(q>240)
+		{
+			in_code(ncode,scode);  //密码重置为管理员密码
+			memset(ncode2,'-',sizeof(ncode2));//ncode2重置
+			q=0;              //定时计数归零
+			while(1)
+		  {
+			  LED1();      //数码管刷新显示OFF状态
+				buz();        //无源蜂鸣器响应函数
+			  if(q==180)   //蜂鸣器响持续9s
+			  {
+				  break;
+			  }
+		  }
+			break;
+		}	
+		num=KeyPro();
+		if(num!=0xff)      
+		{
+			if(num>=0&&num<=9)
+			{
+				ncode2[count-1]=num;	//ncode2存储用户输入的内容
+				count++;
+				if(count==9) break;
+			}
+			else//若在输入途中点击按钮A或者B及符号键，则清零重新输入
+			{
+				memset(ncode2,'-',sizeof(ncode2));//ncode2重置
+				count=1;    
+			}				
+		}		
+  }
+	//判断此时系统是否在重置密码状态
+	 if(confirm()==1)    //判断后输出提示
+	 {	
+		 if(keyre==1)  flag=1;  //重置密码锁解开
+		 q=0;
+		 while(1)
+		 {
+			 LED2();      //数码管刷新显示888 
+            buz();       //无源蜂鸣器响应函数			 
+			 if(q==100)   //LED2亮和蜂鸣器响持续5s
+			 {
+				 break;
+			 }
+		 }
+		 inc=1;
+	 }
+	 else
+	 {	
+		 if(inc<3) inc++; //累计错误次数
+		 else
+			 {	//错误三次后，系统锁定，密码重置为管理员密码
+				 in_code(ncode,scode);
+				 inc=1;
+				 q=0;
+				 while(1)
+				 {
+					 LED1();      //数码管刷新显示OFF
+					 buz();             //无源蜂鸣器响应函数
+				   if(q==180)   //蜂鸣器响持续9s
+				   {
+						 break;
+				   }
+				 }				 
+			 }
+	 }
+	keyin=0;       //系统重新进入锁定状态
+	keyre=0;
+  q=0;   //计数归零
+} 
+
+/*重置密码*/
+void  reset()
+{
+	uint count=1,cc;		
+	while(1)
+	{	
+		LED3(); //数码管刷新显示输入状态
+		num=KeyPro();
+		if(num!=0xff)
+		{	
+			if(num>=0&&num<=9)
+			{
+				ncode2[count-1]=num;		
+				count++;
+				cc=1;
+				if(count==9) break;
+			}
+			else//若在输入途中点击按钮A或者B或其他符号键，停止输入
+			{	
+				cc=0;
+				count=9;  
+				break;
+			}					
+		}
+	}
+	//若成功输入八位密码，则成功修改密码
+	if(cc==1)
+	{
+		in_code(ncode,ncode2);
+		q=0;    //定时计数归零
+		while(1)
+		 {
+			 LED1();     //数码管显示刷新锁定状态
+			  buz();             //无源蜂鸣器响应
+			 if(q==60)   //蜂鸣器响持续3s
+			 {
+				 break;
+			 }
+		 }
+	}
+	keyre=0;
+  flag=0;	
+}
+
+
+void main(void)
+{ 	
+	timeconfigure();  //定时器初始化
+	while(1)
+	{
+		LED1();        
+		key();          //按键检测函数
+		if(keyin==1)      //进入尝试解锁状态
+		{	
+			input();									
+		}	
+		if(keyre==1)      //进入重置密码状态
+		{
+			input();
+			if(flag==1) reset();
+		}
+	}
+}
